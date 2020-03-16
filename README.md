@@ -37,23 +37,51 @@ supervisor = server.supervisor
 loader = server.loader
 system = server.system
 
-# adds two additional program configurations to supervisor.
-loader.addProgramToGroup('foo', {"command": "pwd"})
-loader.addProgramToGroup('bar', {"command": "ls"})
+# creating an example group and process
+group_name = 'mygroup'
+process_name = 'fizzbuzz'
+process_conf = {
+    'command': 'fizzbuzz.py',
+    'autostart': 'true',
+    'autorestart': 'false',
+    'environment': 'PYTHONUNBUFFERED=1',
+    'priority': '1',
+    'startsecs': '0',
+    'startretries': '0',
+    'stopwaitsecs': '0',
+    'exitcodes': '0,1,2',
+    'redirect_stderr': 'true',
+    'stderr_logfile': 'NONE',
+    'stdout_logfile': '%(ENV_LOGDIR)s/%(program_name)s_%(process_num)d.log',
+    'stdout_events_enabled': 'true',
+    'stderr_events_enabled': 'true',
+    'process_name': '%(program_name)s_%(process_num)d',
+}
 
-loader.getGroupNames()  # ['foo', 'bar']
+# Check if a group exists
+loader.hasGroup(group_name)    # False
+loader.addGroup(group_name)
+loader.hasGroup(group_name)    # True
+
+# Check if a program exists within a group
+loader.hasProcessInGroup(group_name, process_name)    # False
+loader.addProgramToGroup(group_name, process_name, process_conf)    # fizzbuzz_1
+loader.hasProcessInGroup(group_name, process_name)    # True
+
+# Get group names
+loader.getgroup_names()  # ['mygroup']
+
+# Add another instance of the same process
+loader.addProgramToGroup(group_name, process_name, process_conf)    # fizzbuzz_2
 ```
 
 ## API
 
-#### getAPIVersion
+TODO: improve documentation
 
-#### getGroupNames
-
-#### log
-
-#### addGroup
-
-#### addProgramToGroup
-
-#### removeProcessFromGroup
+* getAPIVersion
+* getGroupNames
+* log
+* addGroup
+* addProgramToGroup
+* TODO: removeProcessFromGroup
