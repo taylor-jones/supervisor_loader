@@ -1,315 +1,275 @@
 from supervisor.options import UnhosedConfigParser
 from supervisor.options import ProcessGroupConfig
-from supervisor.datatypes import list_of_strings
+
 from supervisor.states import SupervisorStates
-from supervisor.states import ProcessStates
 from supervisor.states import STOPPED_STATES
-from supervisor.xmlrpc import Faults as SupervisorFaults
+from supervisor.xmlrpc import Faults
 from supervisor.xmlrpc import RPCError
 import supervisor.loggers
 
-API_VERSION = "1.0"
+API_VERSION = '1.0'
 
-class Faults:
-    NOT_IN_WHITELIST = 230
+
+class CountCache:
+    """
+    Maintains an integer count of the number of the number of
+    process instances for any given program name.
+    """
+    def __init__(self):
+        self._cache = {}
+
+    def clear(self):
+        self._cache.clear()
+        
+    def get(self, key):
+        if key in self._cache:
+            return self._cache[key]
+        return 0
+
+    def increment(self, key):
+        if key in self._cache:
+            self._cache[key] += 1
+        else:
+            self._cache[key] = 1
+
+    def decrement(self, key):
+        if key in self._cache:
+            self._cache[key] -= 1
+        if self._cache[key] == 0:
+            del self._cache[key]
+
+    def keys(self):
+        return sorted(self._cache.keys())
+
+
 
 class LoaderNamespaceRPCInterface:
-    """
-    A supervisor rpc interface that provides additional functionality
-    for dynamically adding groups and programs to the the supervisor
-    configuration at runtime.
-    """
-
-    def __init__(self, supervisord, whitelist=[]):
+    def __init__(self, supervisord, **kwargs):
         self.supervisord = supervisord
-        self._whitelist = list_of_strings(whitelist)
+        self.numprocs = CountCache()
 
 
-    def _update(self, func_name):
-        """
-        Sets the update text to send via the rpc interface. Checks to ensure
-        supervisor isn't in the middle of shutting down and that the argued
-        function is allowed to be executed.
-        
-        Arguments:
-            func_name {str} -- the name of the method for supervisor to call
-            
-        Raises:
-            RPCError: SHUTDOWN_STATE if supervisor is in the middle of 
-                shutting down
-            RPCError: NOT_IN_WHITELIST if a whitelist of methods has been
-                specified and the given func_name is not in the whitelist
-        """
-        self.update_text = func_name
-
+    def _update(self, function_name):
+        self.update_text = function_name
         state = self.supervisord.get_state()
-        if state == SupervisorStates.SHUTDOWN:
-            raise RPCError(SupervisorFaults.SHUTDOWN_STATE)
 
-        if len(self._whitelist) and func_name not in self._whitelist:
-            raise RPCError(Faults.NOT_IN_WHITELIST, func_name)
+        if state == SupervisorStates.SHUTDOWN:
+            raise RPCError(Faults.SHUTDOWN_STATE)
 
 
     def getAPIVersion(self):
         """
         Returns the version of the RPC API used by supervisor_loader
-
+        
         Returns:
-            str -- the version id of supervisor_loader
+            str
         """
-        self._update("getAPIVersion")
+        self._update('getAPIVersion')
         return API_VERSION
 
 
     def getGroupNames(self):
         """
-        Returns an list of the names of supervisor process groups.
+        Returns a list of the supervisor process groups.
         
         Returns:
-            list -- the names of supervisor process groups
+            list
         """
-        self._update("getGroupNames")
+        self._update('getGroupNames')
         return list(self.supervisord.process_groups.keys())
+
+
+    def hasGroup(self, group_name):
+        """
+        Checks if a specified group exists in the supervisor configuration.
+        
+        Args:
+            group_name (str): The name of the group to check for
+        
+        Returns:
+            bool
+        """
+        group = self.supervisord.process_groups.get(group_name)
+        return group is not None
+
+
+    def hasProcessInGroup(self, group_name, process_name):
+        """
+        Checks if a specified process exists in a specified group
+        
+        Args:
+            group_name (str): The name of the group
+            process_name (str): The name of the process
+        
+        Returns:
+            bool
+        """
+        try:
+            group = self._get_process_group(group_name, False)
+        except RPCError as e:
+            return False
+        return group.processes.get(process_name) is not None
 
 
     def log(self, message, level=supervisor.loggers.LevelsByName.INFO):
         """
         Writes a message to the main supervisor log.
 
-        Arguments:
-            message {str} -- the message to log
+        Args:
+            message (str): The message to write.
+            level (str, optional): The log level to assign to the message.
+                Defaults to supervisor.loggers.LevelsByName.INFO.
 
-        Keyword Arguments:
-            level {str|int} -- the log level to which this message should be
-                applied (e.g. INFO, 20, etc) (default: {INFO})
+        Raises:
+            RPCError: INCORRECT_PARAMETERS if an invalid log level is provided
 
         Returns:
-            bool -- True if no error occurs, False if an error occurs
+            boolean: True, unless an error was raised.
         """
-        self._update("log")
+        self._update('log')
 
         if isinstance(level, str):
-            log_levels = supervisor.loggers.LevelsByName
-            level = getattr(log_levels, level.upper(), None)
+            level = getattr(
+                supervisor.loggers.LevelsByName, level.upper(), None)
 
         if supervisor.loggers.LOG_LEVELS_BY_NUM.get(level, None) is None:
-            raise RPCError(SupervisorFaults.INCORRECT_PARAMETERS)
+            raise RPCError(Faults.INCORRECT_PARAMETERS)
 
         self.supervisord.options.logger.log(level, message)
         return True
 
 
-    def addProgramToGroup(self, program_name, program_conf, group_name=None):
+    def addGroup(self, group_name, priority=999):
         """
-        Adds a new program to an (optionally) existing process group. If no 
-        process group is specified, we'll first look to see if a process group 
-        exists that matches the process name. If so, we'll add the process to 
-        the existing group. If no matching group already exists, we'll create 
-        one and then add the process to the newly-created group.
+        Adds a new process group to the supervisor configuration.
+        
+        Args:
+            group_name (str): The name of the group to add.
+            priority (int, optional): The group priority. Defaults to 999.
+            
+        Returns:
+            (boolean) True, unless an error is raised.
+        """
+        self._update('addGroup')
 
-        Arguments:
-            program_name {str} -- the name of the program
-            program_conf {dict} -- the program's configuration, which includes
-                all available options from a typeical supervisord.conf config
+        # make sure the group doesn't already exist
+        if self.supervisord.process_groups.get(group_name) is not None:
+            raise RPCError(Faults.ALREADY_ADDED, group_name)
         
-        Keyword Arguments:
-            group_name {str} -- the group name to add the program to (default: {None})
+        options = self.supervisord.options
+        group_config = ProcessGroupConfig(
+            options, group_name, priority, process_configs=[])
+        self.supervisord.options.process_group_configs.append(group_config)
+        group_config.after_setuid()
+        self.supervisord.process_groups[group_name] = group_config.make_group()
+
+        return True
+
+
+    def _apply_process_num(self, config, process_num):
+        # make sure the process_name is present
+        config['process_name'] = '%(program_name)s_{0}'.format(process_num)
+
+        # replace any instances of the process_num interpolation with the
+        # determined process_num value
+        target = '%(process_num)02d'
+        for key, value in config.iteritems():
+            config[key] = value.replace(target, process_num)
         
-        Raises:
-            RPCError: INCORRECT_PARAMETERS if program config is invalid
-            RPCError: BAD_NAME if the program already exists
+        return config
+
+
+    def addProgramToGroup(self, group_name, program_name, program_options):
+        """
+        Adds a new program to an existing process group.
+        
+        Args:
+            group_name (str): The name of the group to add this program to.
+            program_name (str): The name of the program to add to supervisor.
+            program_options (dict): The program configuration options.
         
         Returns:
-            bool -- True if no error occurs, False if an error occurs
+            (boolean): True, unless an error is raised
         """
-        self._update("addProgramToGroup")
+        self._update('addProgramToGroup')
+        group = self._get_process_group(group_name, True)
 
-        # fall back to the program name if no group name was argued
-        group_name = group_name or program_name
-        group = self._ensureProcessGroup(group_name)
-
-        # make a configparser instance for program options
-        section_name = "program:%s" % program_name
-        parser = self._makeConfigParser(section_name, program_conf)
-
-        # make process configs from a parser instance
+        # determine the process name based on the current instances
+        # of this program.
+        current_program_instances = self.numprocs.get(program_name)
+        process_num = '%d' % (current_program_instances + 1)
+        self._apply_process_num(program_options, process_num)
+        
+        # make a configparser instance for the program
+        section_name = 'program:%s' % program_name
+        parser = self._make_config_parser(section_name, program_options)
+        
+        # make the process configs from the parser instance
         options = self.supervisord.options
         try:
             new_configs = options.processes_from_section(
-                parser, section_name, group_name
-            )
+                parser, section_name, group_name)
         except ValueError as e:
-            raise RPCError(SupervisorFaults.INCORRECT_PARAMETERS, e)
-
-        # make sure the desired process name doesn't already exist
+            raise RPCError(Faults.INCORRECT_PARAMETERS, e)
+        
+        # make sure the new program doesn't already exist in the group
         for new_config in new_configs:
             for existing_config in group.config.process_configs:
                 if new_config.name == existing_config.name:
-                    raise RPCError(SupervisorFaults.BAD_NAME, new_config.name)
+                    raise RPCError(Faults.BAD_NAME, new_config.name)
 
-        # add the process configurations
+        # add the new program configuration(s) to the group
         group.config.process_configs.extend(new_configs)
-
         for new_config in new_configs:
-            # the process group config already exists, so its after_setuid hook
-            # will not be called again to make the auto child logs for this
-            # process.
             new_config.create_autochildlogs()
-
-            # add process instance
             group.processes[new_config.name] = new_config.make_process(group)
-
+        
+        self.numprocs.increment(program_name)
         return True
 
 
-    def removeProcessFromGroup(self, group_name, process_name):
+    def _get_process_group(self, group_name, create_group_if_not_exists=True):
         """
-        Removes a process from a process group. When a program is added with
-        addProgramToGroup(), one or more processes for that program are added
-        to the group.  This method removes individual processes (named by the
-        numprocs and process_name options), not programs.
+        Retrieves the process group config for a specified process group.
         
-        Arguments:
-            group_name {str} -- name of the group to remove
-            process_name {str} -- name of the process to remove from the group
-        
-        Raises:
-            RPCError: BAD_NAME if the process does not exist
-            RPCError: STILL_RUNNING if the process is still running
-        
+        Args:
+            group_name (str): The name of the process group to get.
+
         Returns:
-            bool -- True if no error, False if error
+            (ProcessGroupConfig): The process group configuration
         """
-        
-        self._update("removeProcessFromGroup")
-
-        group = self._getProcessGroup(group_name)
-        process = group.processes.get(process_name)
-        
-        # make sure the process exists
-        if process is None:
-            raise RPCError(SupervisorFaults.BAD_NAME, process_name)
-        
-        # make sure the process isn't still running
-        if process.pid or process.state not in STOPPED_STATES:
-            raise RPCError(SupervisorFaults.STILL_RUNNING, process_name)
-
-        group.transition()
-
-        # delete process config from group, then delete process
-        for index, config in enumerate(group.config.process_configs):
-            if config.name == process_name:
-                del group.config.process_configs[index]
-
-        del group.processes[process_name]
-        return True
+        if not self.hasGroup(group_name):
+            if create_group_if_not_exists:
+                self.addGroup(group_name)
+            else:
+                raise RPCError(Faults.BAD_NAME, 'group: %s' % group_name)
+        return self.supervisord.process_groups.get(group_name)
 
 
-    def addGroup(self, name, priority=999):
+    def _make_config_parser(self, section_name, section_options):
         """
-        Adds a new supervisor process group.
+        Populates a new UnhosedConfigParser instance with a section
+        built from a dict of section options.
         
-        Arguments:
-            name {str} -- the name of the process group to add
-        
-        Keyword Arguments:
-            priority {int} -- priority to assign to the  group (default: {999})
-        
-        Raises:
-            RPCError: ALREADY_ADDED if group already exists
-        
+        Args:
+            section_name (str) -- The name of the section
+            section_options (dict) -- The configuration options for the section
+
         Returns:
-            bool -- True if no error occurs, False if error occurs
-        """
-        self._update("addGroup")
+            config (supervisor.options.UnhosedConfgParser)
 
-        options = self.supervisord.options
-        group_config = None
-
-        for config in options.process_group_configs:
-            if name == config.name:
-                group_config = config
-                break
-
-        if not group_config:
-            group_config = ProcessGroupConfig(
-                options, name, priority, process_configs=[]
-            )
-            self.supervisord.options.process_group_configs.append(group_config)
-
-        if name not in self.supervisord.process_groups:
-            group_config.after_setuid()
-            self.supervisord.process_groups[name] = group_config.make_group()
-        else:
-            raise RPCError(SupervisorFaults.ALREADY_ADDED, name)
-
-        return True
-
-
-    def _getProcessGroup(self, name):
-        """
-        Finds a process group, given the process group's name
-        
-        Arguments:
-            name {str} -- the name of the process group
-        
-        Raises:
-            RPCError: Raises error if no matching process group is found
-        
-        Returns:
-            object -- supervisor process group
-        """
-        group = self.supervisord.process_groups.get(name)
-        if group is None:
-            raise RPCError(SupervisorFaults.BAD_NAME, "group: %s" % name)
-        return group
-
-
-    def _ensureProcessGroup(self, name):
-        """
-        Checks if a given process group exists. If not, the group is created.
-        
-        Arguments:
-            name {str} -- The name of the process group
-        
-        Raises:
-            RPCError: Raises error if group could not be ensured to exist
-        
-        Returns:
-            object -- a supervisor group object
-        """
-        group = self.supervisord.process_groups.get(name)
-        if group is None:
-            self.addGroup(name)
-            group = self.supervisord.process_groups.get(name)
-        return group
-
-
-    def _makeConfigParser(self, section_name, options):
-        """
-        Populate a new UnhosedConfigParser instance with a section built 
-        from an options dict.
-        
-        Arguments:
-            section_name {str} -- the name of the section
-            options {dict} -- options used to populate the section
-        
         Raises:
             RPCError: Raises error if section parameters are invalid
-        
-        Returns:
-            object
         """
         config = UnhosedConfigParser()
-
         try:
             config.add_section(section_name)
-            for k, v in dict(options).items():
-                config.set(section_name, k, v)
+            for key, value in dict(section_options).items():
+                config.set(section_name, key, value)
         except (TypeError, ValueError):
-            raise RPCError(SupervisorFaults.INCORRECT_PARAMETERS)
-
+            raise RPCError(Faults.INCORRECT_PARAMETERS)
         return config
+
 
 
 def make_loader_rpcinterface(supervisord, **config):

@@ -1,6 +1,10 @@
-> __NOTE__: This program is an adaptaptation, originally based on ideas from [supervisor_twiddler](https://github.com/mnaberez/supervisor_twiddler/blob/master/supervisor_twiddler/rpcinterface.py).
-
 # supervisor_loader
+
+## Credit
+
+This program is an adaptaptation, heavily based on ideas from the following projects:
+* [supervisor_twiddler](https://github.com/mnaberez/supervisor_twiddler/blob/master/supervisor_twiddler/rpcinterface.py)
+* [supervisor_cache](https://github.com/mnaberez/supervisor_cache)
 
 supervisor_loader is an xml-rpc extension for supervisor that allows for dynamically adding or removing program groups, program, and/or processes to the supervisor configuration at runtime.
 
@@ -18,8 +22,6 @@ supervisor.rpcinterface_factory = supervisor_loader.rpcinterface:make_loader_rpc
 After adding `supervisor_loader` to your supervisor configuration, you can then reference the `loader` object in an xml-rpc connection to the supervisor server, just as you would the `supervisor` object:
 
 ```python
-#!/usr/bin/env python
-
 import sys
 
 # import the appropriate ServerProxy depending
